@@ -1,7 +1,7 @@
 
 <https://www.tidymodels.org/start/recipes/>
 
-```{r}
+```{r include=FALSE}
 library(easypackages)
 libraries('tidyverse','lubridate','janitor','showtext',
           'summarytools','tidymodels','nycflights13','vip','nnet')
@@ -17,16 +17,16 @@ Let's use the nycflights13 data to predict whether a plane arrives more than 30 
 ```{r}
 flights_df  <- 
     flights %>% 
-      inner_join(weather,by = c('origin','time_hour')) %>% 
-      mutate(arr_delay  = factor(ifelse(arr_delay >30,'late','ontime')),
-             date = date(time_hour)) %>% 
+      inner_join(weather,by = c('origin','time_hour')) %>%  # join weather property 
+      mutate(arr_delay  = factor(ifelse(arr_delay >30,'late','ontime')), # convert arr_delay > 30 = late 
+             date = date(time_hour)) %>% # only keep date formatted 
       select(dep_time,flight,origin,dest,air_time,distance,carrier,date,arr_delay,time_hour) %>% 
       #map_df(~sum(is.na(.)))
-      na.omit() %>% 
-      mutate(across(where(is.character),as.factor)) 
+      na.omit() %>% # remove na row 
+      mutate(across(where(is.character),as.factor)) # convert all character column to factor  
 ```
 
-## Split data for train/test
+## Data Spliting & Resampling
 
 ```{r}
 set.seed(1024)
@@ -34,6 +34,11 @@ set.seed(1024)
 flights_split <- initial_split(flights_df,prop = 0.8)
 flights_train <- training(flights_split) 
 flights_test <- testing(flights_split)
+
+#resampling setting 
+flights_fold <- vfold_cv(flights_train,5)
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = FALSE)
+
 ```
 
 ## CREATE RECIPE AND ROLES
@@ -59,6 +64,7 @@ flights_train %>%
 #> 1 LEX
 ```
 
+
 ```{r}
 flights_train %>% 
   recipe(arr_delay ~.) %>% 
@@ -66,6 +72,7 @@ flights_train %>%
   step_date(date,features = c('dow','month')) %>% 
   step_holiday(date,holidays = timeDate::listHolidays("US")) %>% 
   step_rm(date) %>% 
+  step_novel(all_nominal_predictors()) %>% 
   step_dummy(all_nominal_predictors()) %>% 
   step_zv(all_predictors()) %>% 
   prep() %>% 
@@ -83,23 +90,41 @@ flights_rec <-
 
 ```
 
-## Define Model & Workflow
+### Mutlple Model & Workflow Resample
 
 ```{r}
+# Different Model 
 lr_mod <- 
   logistic_reg() %>% 
   set_engine("glm")
 
+
+# List of Model & Recipe 
+preproc <- list(basic = flights_rec)
+models <- list(lr = lr_mod)
+
+# Workflow set 
+wf_set <- workflow_set(preproc,models, cross = TRUE)
+
+# Worflow Mapped 
+wf_mapped <- 
+  wf_set %>% 
+    workflow_map('fit_resamples',seed = 1024,verbose = TRUE, 
+               resamples = flights_fold , control = keep_pred )
+
+# Collect Matrix
+collect_metrics(wf_mapped) 
+```
+
+## Workflow & Fit & Predict
+
+```{r}
+# Define Workflow 
 lr_wf <-
   workflow() %>% 
   add_recipe(flights_rec) %>% 
   add_model(lr_mod) 
 
-```
-
-## Fit & Predict
-
-```{r}
 lr_fit <- fit(lr_wf,flights_train)
 
 lr_fit %>% 
