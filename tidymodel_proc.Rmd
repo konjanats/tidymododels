@@ -1,0 +1,319 @@
+
+<https://www.tidymodels.org/start/recipes/>
+
+```{r}
+library(easypackages)
+libraries('tidyverse','lubridate','janitor','showtext',
+          'summarytools','tidymodels','nycflights13','vip','nnet')
+theme_set(theme_light())
+font_add_google('Roboto Slab','Roboto Slab')
+showtext_auto()
+tidymodels_prefer()
+options(scipen=999)
+```
+
+Let's use the nycflights13 data to predict whether a plane arrives more than 30 minutes late. This data set contains information on 325,819 flights departing near New York City in 2013
+
+```{r}
+flights_df  <- 
+    flights %>% 
+      inner_join(weather,by = c('origin','time_hour')) %>% 
+      mutate(arr_delay  = factor(ifelse(arr_delay >30,'late','ontime')),
+             date = date(time_hour)) %>% 
+      select(dep_time,flight,origin,dest,air_time,distance,carrier,date,arr_delay,time_hour) %>% 
+      #map_df(~sum(is.na(.)))
+      na.omit() %>% 
+      mutate(across(where(is.character),as.factor)) 
+```
+
+## Split data for train/test
+
+```{r}
+set.seed(1024)
+
+flights_split <- initial_split(flights_df,prop = 0.8)
+flights_train <- training(flights_split) 
+flights_test <- testing(flights_split)
+```
+
+## CREATE RECIPE AND ROLES
+
+1.  `update_role()` : Keep this variable, but not use them as outcomes or predictors.
+2.  `step_date()` : Create date into one more factor , month, dow (day of week), doy (day of year), week, month, decimal
+3.  `step_holiday()` : Create a binary variable indicating whether the current date is a holiday or not.
+4.  `step_rm()` : remove varriable
+5.  `step_dummy` : create dummy varriables
+6.  `step_zv` : remove columns from the data when the training set data have a single value, so it is added to the recipe after `step_dummy()`
+
+When the recipe is applied to the training set, a column is made for LEX,HDN because the factor levels come from flight_data (not the training set), but this column will contain all zeros for testing set. so refer to `step_zv`
+
+```{r}
+flights_train %>% 
+  distinct(dest) %>% 
+  anti_join(flights_test)
+
+#> Joining, by = "dest"
+#> # A tibble: 1 x 1
+#>   dest 
+#>   <fct>
+#> 1 LEX
+```
+
+```{r}
+flights_train %>% 
+  recipe(arr_delay ~.) %>% 
+  update_role(time_hour,new_role = 'ID') %>% 
+  step_date(date,features = c('dow','month')) %>% 
+  step_holiday(date,holidays = timeDate::listHolidays("US")) %>% 
+  step_rm(date) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_zv(all_predictors()) %>% 
+  prep() %>% 
+  bake(new_data = NULL)
+  
+flights_rec <-
+      flights_train %>% 
+        recipe(arr_delay ~.) %>% 
+        update_role(time_hour,new_role = 'ID') %>% 
+        step_date(date,features = c('dow','month')) %>% 
+        step_holiday(date,holidays = timeDate::listHolidays("US")) %>% 
+        step_rm(date) %>% 
+        step_dummy(all_nominal_predictors()) %>% 
+        step_zv(all_predictors())
+
+```
+
+## Define Model & Workflow
+
+```{r}
+lr_mod <- 
+  logistic_reg() %>% 
+  set_engine("glm")
+
+lr_wf <-
+  workflow() %>% 
+  add_recipe(flights_rec) %>% 
+  add_model(lr_mod) 
+
+```
+
+## Fit & Predict
+
+```{r}
+lr_fit <- fit(lr_wf,flights_train)
+
+lr_fit %>% 
+  pull_workflow_fit() %>% 
+  tidy()
+
+# Prediction as a class
+flights_test %>% 
+    bind_cols(predict(lr_fit,flights_test))
+
+#Prediction as prob 
+flights_test %>% 
+    bind_cols(predict(lr_fit,flights_test,type = 'prob'))
+```
+
+# Evaluate Model
+
+```{r}
+# Define metric for evaluate 
+class_metric <- metric_set(accuracy,precision,yardstick::spec,recall,kap,f_meas)
+
+# Evalutate 
+flights_pred <- flights_test %>% 
+                   bind_cols(predict(lr_fit,flights_test))
+  
+flights_pred %>% 
+    class_metric(arr_delay,estimate = .pred)
+
+# ROC Curve
+flights_roc <- flights_test %>% 
+                   bind_cols(predict(lr_fit,flights_test,type = 'prob'))
+
+flights_roc %>% 
+  roc_curve(arr_delay,.pred_late) %>% 
+  autoplot()
+
+```
+
+------------------------------------------------------------------------
+
+## CASE STUDY : HOTEL BOOKING CANCELLATION AND PRICE PREDICTION 
+
+```{r include=FALSE}
+car.price <- 
+  read_csv('https://raw.githubusercontent.com/konjanats/dataset/main/carprice_assignment.csv') %>% 
+  clean_names()
+```
+
+
+```{r}
+# remove reservation status 
+car.price_df <-
+  car.price %>% 
+    select(-car_name) %>% 
+    mutate(symboling = case_when(
+      symboling == -3 ~ 'Very Risk',
+      symboling == -2 ~ 'High Risk',
+      symboling == -1 ~ 'Risk',
+      symboling == 0 ~ 'Moderate',
+      symboling == 1 ~ 'Safe',
+      symboling == 2 ~ 'High Safe',
+      symboling == 3 ~ 'Very Safe'
+    )) %>% 
+    mutate(across(where(is.character),factor)) %>% 
+    mutate(price = log10(price))
+
+```
+
+
+```{r}
+car.price_df  %>% 
+# map_df(~sum(is.na(.)))
+ dfSummary(graph.col = F)
+```
+
+## Plot for relationship 
+
+```{r}
+car.price_df %>% 
+  ggplot(aes(price)) + 
+  geom_histogram()
+```
+
+
+
+### DATA SPLITTING & RESAMPLING 
+
+```{r}
+set.seed(1024)
+car_split <- initial_split(car.price_df,0.8,strata = carbody)
+car_train <- training(car_split) 
+car_test <- testing(car_split)
+
+#resampling setting 
+car_fold <- vfold_cv(car_train,10)
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+```
+
+### Recipe 
+
+```{r}
+car_bake <-
+  car_train %>% 
+    recipe(price ~.,) %>% 
+    update_role(car_id,new_role = 'ID') %>% 
+    step_log(all_numeric_predictors(),base = 10) %>% 
+    step_dummy(all_nominal_predictors()) %>% 
+    step_zv(all_predictors()) %>% 
+    prep() %>% 
+    bake(new_data = NULL) 
+    
+car_rec <- 
+  car_train %>% 
+    recipe(price ~.,) %>% 
+    update_role(car_id,new_role = 'ID') %>% 
+    step_log(all_numeric_predictors(),base = 10) %>% 
+    step_dummy(all_nominal_predictors()) %>% 
+    step_zv(all_predictors()) 
+```
+
+### Mutlple Model & Workflow Resample
+
+```{r}
+# Different Model 
+mlp_mod <-
+  mlp() %>% 
+    set_engine("nnet") %>% 
+    set_mode("regression")
+
+lm_mod <- 
+  linear_reg() %>% 
+  set_engine('lm')
+
+# List of Model & Recipe 
+preproc <- list(basic = car_rec)
+models <- list(nnet = mlp_mod,linear = lm_mod)
+
+# Workflow set 
+wf_set <- workflow_set(preproc,models, cross = TRUE)
+
+# Worflow Mapped 
+wf_mapped <- 
+  wf_set %>% 
+    workflow_map('fit_resamples',seed = 1024,verbose = TRUE, 
+               resamples = car_fold , control = keep_pred )
+
+# Collect Matrix
+collect_metrics(wf_mapped) 
+
+```
+
+## Workflow and Fit 
+
+```{r}
+# Workflow 
+nnet_wf <-workflow() %>% 
+            add_recipe(car_rec) %>% 
+            add_model(mlp_mod)
+
+lm_wf <-workflow() %>% 
+            add_recipe(car_rec) %>% 
+            add_model(lm_mod)
+ 
+
+# Fit model 
+nnet_fit <- fit(nnet_wf,car_train)
+lm_fit <- fit(lm_wf,car_train)
+
+nnet_fit %>% 
+  pull_workflow_fit()
+
+lm_fit %>% 
+  pull_workflow_fit() %>% 
+  tidy() %>% 
+  arrange(p.value)
+```
+
+# Predict & Evaluate 
+
+```{r}
+car_test %>% 
+  bind_cols(predict(lm_fit,car_test)) %>% 
+  bind_cols(predict(nnet_fit,car_test))
+  
+car_pred <-
+  car_test %>% 
+    mutate(lm_pred = pull(predict(lm_fit,car_test)),
+         nnet_pred = pull(predict(nnet_fit,car_test)))
+
+car_metrics <- metric_set(rmse, rsq, mae)
+car_metrics(car_pred, truth = price, estimate = lm_pred)
+car_metrics(car_pred, truth = price, estimate = nnet_pred)
+
+```
+# Plot Model performace 
+
+```{r}
+car_pred %>% 
+  ggplot(aes(lm_pred,price)) +
+  geom_point() +
+  geom_abline(lty = 2) +
+  coord_obs_pred() +
+  labs(x = 'Price (log10)' ,
+       y = 'Price Prediction (log10)')
+```
+
+# Varriable Importance
+
+```{r}
+lm_fit %>% 
+  pull_workflow_fit() %>% 
+  vip()
+```
+
+
+
