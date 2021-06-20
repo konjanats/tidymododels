@@ -1,0 +1,430 @@
+[Ref:](https://www.tmwr.org/recipes.html)
+
+```{r}
+library(easypackages)
+libraries('tidyverse','lubridate','janitor','showtext',
+          'summarytools','tidymodels')
+theme_set(theme_light())
+font_add_google('Roboto Slab','Roboto Slab')
+showtext_auto()
+tidymodels_prefer()
+options(scipen=999)
+
+```
+
+```{r}
+# load housing data 
+ames <- ames %>% 
+        clean_names() %>% 
+        mutate(sale_price = log10(sale_price))
+
+ames %>% 
+  ggplot(aes(sale_price)) + 
+  geom_histogram() +
+  scale_x_log10()
+
+ames %>% 
+   select(sale_price) %>% summary()
+```
+
+## COMMON METHODS FOR SPLITTING DATA
+
+```{r}
+set.seed(1021)
+# stara to handle class imbalance , but only a single column can be used for stratification.
+ames_split <- initial_split(ames,prop = 0.8,strata = sale_price) 
+ames_train <- training(ames_split) 
+ames_test <- testing(ames_split)
+```
+
+## Feature engineering with recipes
+
+### A SIMPLE RECIPE FOR THE AMES HOUSING DATA
+
+-   The neighborhood (qualitative, with 29 neighborhoods in the training set)
+
+-   The gross above-grade living area (continuous, named `gr_liv_area`)
+
+-   The year built (`year_built`)
+
+-   The type of building (`Bldg_Type` with values `OneFam` (n=1,924) `TwoFmCon` (n=46), `Duplex` (n=95), `Twnhs` (n=80), and `TwnhsE` (n=197)
+
+## USING RECIPES
+
+[**recipe(recipe obj) -\> prep(recipe obj) \> bake(tibble)**]{.ul}
+
+-   `step_log()` declares that gr_liv_area should be log transformed.
+-   `step_dummy()` is used to specify which variables should be converted from a qualitative(char or factor) format to a quantitative(number order) format
+
+```{r}
+ames_rec <-  recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type,
+             data = ames_train) %>%
+             step_log(gr_liv_area, base = 10) %>% 
+             step_dummy(all_nominal_predictors()) %>% 
+             prep()
+```
+
+```{r}
+bake(ames_rec, new_data = NULL) %>% 
+  head()
+
+bake(ames_rec, new_data = ames_test) %>% 
+  head()
+```
+
+### COMMON STEP
+
+-   `step_unknown()` can be used to change missing values to a dedicated factor level
+
+-   `step_novel()` can allow a new level for this purpose.
+
+-   `step_other()` can be used to analyze the frequencies of the factor levels in the training set and convert infrequently occurring values to a catch-all level of "other", with a specific threshold
+
+### ENCODING BETWEEN QUALITATIVE and NUMERIC FORMAT
+
+-   `step_dummy()` convert quantitative(character & factor) into numeric format
+
+-   `step_unorder()` unorder factor
+
+-   `step_ordinalscore()`convert numeric into factor
+
+```{r}
+recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type,
+             data = ames_train) %>%
+             step_log(gr_liv_area, base = 10) %>% 
+             step_other(neighborhood, threshold = 0.01) %>% 
+             step_dummy(all_nominal_predictors()) %>% 
+             prep() %>% 
+             bake(new_data = NULL)
+```
+
+### INTERACTION TERMS
+
+-   `step_interact( ~ {{column}}:{{column}})` make dummy variables and then form the interactions
+
+```{r}
+ames_train %>% 
+  ggplot(aes(gr_liv_area,sale_price)) +
+  geom_point(alpha = 0.2) + 
+  geom_smooth(method = lm) +
+  facet_wrap(~bldg_type) +
+  labs(title = 'Sale price per Gross Living Area',
+       subtitle = 'Regression slopes for the gross living area are link between different building types:') 
+
+```
+
+```{r}
+recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type,
+             data = ames_train) %>%
+             step_log(gr_liv_area, base = 10) %>% 
+             step_other(neighborhood, threshold = 0.01) %>% 
+             step_dummy(all_nominal_predictors()) %>% 
+             step_interact(~gr_liv_area:starts_with('bldg_type')) %>% 
+             prep() %>% 
+             bake(new_data = NULL)
+```
+
+### SPLINE FUNCTIONS
+
+-   `step_ns()`convert non-linear features into linear (eg. lat,long)
+
+```{r}
+recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type +latitude,
+             data = ames_train) %>%
+             step_log(gr_liv_area, base = 10) %>% 
+             step_other(neighborhood, threshold = 0.01) %>% 
+             step_dummy(all_nominal_predictors()) %>% 
+             step_interact(~gr_liv_area:starts_with('bldg_type')) %>% 
+             step_ns(latitude, deg_free = 20) %>% 
+             prep() %>% 
+             bake(new_data = NULL)
+```
+
+### FEATURE EXTRACTION
+
+PCA can be very effective at reducing the correlation between predictors due to linear combination of the original predictors
+
+-   `step_normalize()`
+-   `step_pca(match('(sf$|gr_live)'))`
+
+```{r}
+recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type + total_bsmt_sf + first_flr_sf,  
+                   data = ames_train) %>%
+                   step_log(gr_liv_area, base = 10) %>% 
+                   step_other(neighborhood, threshold = 0.01) %>% 
+                   step_dummy(all_nominal_predictors()) %>% 
+                   step_normalize(all_numeric()) %>% 
+                   step_interact(~gr_liv_area:starts_with('bldg_type')) %>% 
+                   prep() %>% 
+                   bake(new_data = NULL)
+          
+```
+
+## First Prediction
+
+```{r}
+ames_prep <-recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type +  latitude + longitude,
+                   data = ames_train) %>%
+                   step_log(gr_liv_area, base = 10) %>% 
+                   step_other(neighborhood, threshold = 0.01) %>% 
+                   step_dummy(all_nominal_predictors()) %>% 
+                  # step_normalize(all_numeric(),-all_outcomes()) %>% 
+                   step_interact(~ gr_liv_area:starts_with('bldg_type_')) %>% 
+                   step_ns(latitude,longitude, deg_free = 20) %>% 
+                   prep()
+```
+
+```{r}
+ames_train_prep <- bake(ames_prep, new_data = NULL)
+ames_test_prep <- bake(ames_prep, ames_test)
+
+# Fit the model; Note that the column Sale_Price has already been
+# log transformed.
+lm_fit <- lm(sale_price ~ ., data = ames_train_prep)
+
+glance(lm_fit)
+tidy(lm_fit)
+
+```
+
+```{r}
+ames_test_prep %>% 
+  head() %>% 
+  mutate(predict = predict(lm_fit,ames_test_prep %>% head())) %>% 
+  select(sale_price,predict,everything())
+```
+
+### Fitting models with parsnip
+
+1.  Specify the type of model based on its mathematical structure (e.g., linear regression, random forest, K-nearest neighbors, etc).
+
+2.  Specify the engine for fitting the model. Most often this reflects the software package that should be used.
+
+3.  When required, declare the mode of the model. The mode reflects the type of prediction outcome. For numeric outcomes, the mode is regression; for qualitative outcomes, it is classification11. If a model can only create one type of model, such as linear regression, the mode is already set.
+
+```{r}
+linear_reg() %>% 
+  set_engine('lm') %>% 
+  translate()
+
+linear_reg(penalty = 1) %>% 
+  set_engine('glmnet') %>% 
+  translate()
+```
+
+```{r}
+lm_form_fit <- linear_reg() %>% 
+               set_engine('lm') %>% 
+               fit(sale_price ~ longitude + latitude, data = ames_train)
+```
+
+```{r}
+rand_forest(trees = 1000, min_n = 5) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression") %>% 
+  translate()
+
+rand_forest(trees = 1000, min_n = 5) %>% 
+  set_engine("ranger", verbose = TRUE) %>% 
+  set_mode("regression") 
+
+```
+
+```{r}
+tidy(lm_form_fit)
+```
+
+### MAKE PREDICTIONS
+
+-   `predict(type = pred_int)` make lower & upper boundary
+
+    | **prediction class** | **column name(s)**       |
+    |:---------------------|--------------------------|
+    | numeric              | .pred                    |
+    | class                | .pred_class              |
+    | prob                 | .pred\_{class levels}    |
+    | conf_int             | .pred_lower, .pred_upper |
+    | pred_int             | .pred_lower, .pred_upper |
+
+```{r}
+ames_test_small <- ames %>% slice(1:5)
+ames_test_small %>% 
+  select(sale_price) %>% 
+  bind_cols(predict(lm_form_fit,ames_test_small)) %>% 
+  bind_cols(predict(lm_form_fit,ames_test_small, type = 'pred_int')) 
+
+```
+
+## STEP for Workflow 
+
+1. Define Recipe 
+2. Define model 
+3. Define workflow (add recipe + prep without bake)
+4. Fit model
+5. Predict (add prediction on no-prep)
+
+```{r}
+# Define Recipe 
+ames_rec <- recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type + 
+            latitude + longitude, data = ames_train) %>%
+            step_log(gr_liv_area, base = 10) %>% 
+            step_other(neighborhood, threshold = 0.01) %>% 
+            step_dummy(all_nominal_predictors()) %>% 
+            step_interact( ~ gr_liv_area:starts_with("bldg_type_") ) %>% 
+            step_ns(latitude, longitude, deg_free = 20)
+
+
+# Define Model 
+tree_model <- 
+  decision_tree(min_n = 2) %>% 
+    set_engine("rpart") %>% 
+    set_mode("regression")
+
+lm_model <- linear_reg() %>% 
+            set_engine('lm')
+
+# Define workflow 
+tree_wf <-workflow() %>% 
+            add_recipe(ames_rec) %>% 
+            add_model(tree_model)
+
+lm_wf <-workflow() %>% 
+            add_recipe(ames_rec) %>% 
+            add_model(lm_model)
+ 
+# Fit model 
+tree_fit <- fit(tree_wf,ames_train)
+lm_fit<- fit(lm_wf,ames_train)
+
+tree_fit %>% 
+  pull_workflow_fit()
+
+
+# Predict 
+ames_test %>% 
+  select(sale_price) %>% 
+  mutate(tree_pred = pull(predict(tree_fit,ames_test)),
+         lm_pred = pull(predict(lm_fit,ames_test)))
+
+```
+
+## Assessing model effectiveness
+
+###  REGRESSION METRICS
+
+- `metric_set(rmse, rsq, mae)` 
+
+```{r}
+ames_preded <- ames_test %>% 
+                select(sale_price) %>% 
+                mutate(tree_pred = pull(predict(tree_fit,ames_test)),
+                lm_pred = pull(predict(lm_fit,ames_test)))
+
+ames_preded %>% 
+  ggplot(aes(sale_price,lm_pred)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(lty = 2) +
+  labs(x = "Sale Price (log10)",
+       y = "Predicted Sale Price (log10)") +
+  coord_obs_pred()   # Scale and size the x- and y-axis uniformly:
+
+```
+
+https://yardstick.tidymodels.org/articles/metric-types.html
+
+```{r}
+ames_metrics <- metric_set(rmse, rsq, mae)
+ames_metrics(ames_preded, truth = sale_price, estimate = lm_pred)
+
+```
+
+###  BINARY CLASSIFICATION METRICS
+
+```{r}
+
+# A confusion matrix: 
+conf_mat(two_class_example, truth = truth, estimate = predicted)
+
+# Metric set for classification 
+class_metric <- metric_set(accuracy,precision,yardstick::spec,recall,kap,f_meas)
+
+two_class_example %>% 
+  class_metric(truth,estimate = predicted)
+
+roc_curve(two_class_example, truth, Class1)
+roc_auc(two_class_example, truth, Class1)
+
+autoplot(roc_curve(two_class_example, truth, Class1))
+
+```
+
+## Resampling for evaluating performance
+
+1. `vfold_cv()` genearate V-fold cross-validation
+2. `control_resamples(save_pred = TRUE, save_workflow = TRUE)` control resamples
+3.  `fit_resamples(resamples = , control = )` estimate performace of test_df
+4. `collect_metrics()` & `collect_predictions()`
+
+```{r}
+ames_folds <- vfold_cv(ames_train, v = 10)
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+lm_res <- lm_wf %>% 
+            fit_resamples(resamples = ames_folds, control = keep_pred)
+
+collect_metrics(lm_res)
+collect_predictions(lm_res)
+
+```
+
+## Comparing models with resampling
+
+### CREATING MULTIPLE MODELS
+
+```{r}
+
+# Different Recipe 
+
+basic_rec <- 
+  recipe(sale_price ~ neighborhood + gr_liv_area + year_built + bldg_type + 
+           latitude + longitude, data = ames_train) %>%
+  step_log(gr_liv_area, base = 10) %>% 
+  step_other(neighborhood, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors())
+
+interaction_rec <- 
+  basic_rec %>% 
+  step_interact( ~ gr_liv_area:starts_with("bldg_type_") ) 
+
+spline_rec <- 
+  interaction_rec %>% 
+  step_ns(latitude, longitude, deg_free = 50)
+
+# Different Model 
+tree_mod <- decision_tree(min_n = 2) %>% 
+              set_engine("rpart") %>% 
+              set_mode("regression")
+
+lm_mod <- linear_reg() %>% 
+            set_engine('lm')
+
+
+preproc <- list(basic = basic_rec, interact = interaction_rec, spline = spline_rec)
+models <- list(tree = tree_mod, linear = lm_mod)
+
+wf_set <- workflow_set(preproc, models, cross = TRUE)
+
+wf_mapped <- wf_set %>% 
+              workflow_map("fit_resamples", 
+               # Options to `workflow_map()`: 
+               seed = 1101, verbose = TRUE,
+               # Options to `fit_resamples()`: 
+               resamples = ames_folds, control = keep_pred)
+
+
+collect_metrics(wf_mapped) %>% 
+  filter(.metric == "rmse") %>% 
+  arrange(mean)
+
+```
+

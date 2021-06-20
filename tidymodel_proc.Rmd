@@ -315,4 +315,3 @@ lm_fit %>%
   vip()
 ```
 
-## Testing GITHUB
