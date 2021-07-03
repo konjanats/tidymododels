@@ -1,6 +1,8 @@
 
 <https://www.tidymodels.org/start/recipes/>
 
+Parsnip Model <https://www.tidymodels.org/find/parsnip/>
+
 ```{r include=FALSE}
 library(easypackages)
 libraries('tidyverse','lubridate','janitor','showtext',
@@ -15,7 +17,7 @@ options(scipen=999)
 Let's use the nycflights13 data to predict whether a plane arrives more than 30 minutes late. This data set contains information on 325,819 flights departing near New York City in 2013
 
 ```{r}
-flights_df  <- 
+flights_df <- 
     flights %>% 
       inner_join(weather,by = c('origin','time_hour')) %>%  # join weather property 
       mutate(arr_delay  = factor(ifelse(arr_delay >30,'late','ontime')), # convert arr_delay > 30 = late 
@@ -36,7 +38,7 @@ flights_train <- training(flights_split)
 flights_test <- testing(flights_split)
 
 #resampling setting 
-flights_fold <- vfold_cv(flights_train,5)
+flights_fold <- vfold_cv(flights_train,2)
 keep_pred <- control_resamples(save_pred = TRUE, save_workflow = FALSE)
 
 ```
@@ -98,10 +100,14 @@ lr_mod <-
   logistic_reg() %>% 
   set_engine("glm")
 
+tree_mod <-
+  decision_tree() %>% 
+    set_engine("rpart") %>% 
+    set_mode("classification") 
 
 # List of Model & Recipe 
 preproc <- list(basic = flights_rec)
-models <- list(lr = lr_mod)
+models <- list(tree = tree_mod,lr = lr_mod)
 
 # Workflow set 
 wf_set <- workflow_set(preproc,models, cross = TRUE)
@@ -130,6 +136,17 @@ lr_fit <- fit(lr_wf,flights_train)
 lr_fit %>% 
   pull_workflow_fit() %>% 
   tidy()
+
+## -------------------------------------------## 
+tree_wf <-
+  workflow() %>% 
+  add_recipe(flights_rec) %>% 
+  add_model(tree_mod)
+
+tree_fit <- fit(tree_wf,flights_train)
+
+tree_fit %>% 
+  pull_workflow_fit() 
 
 # Prediction as a class
 flights_test %>% 
