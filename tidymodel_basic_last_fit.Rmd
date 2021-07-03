@@ -1,0 +1,119 @@
+
+
+```{r}
+library(easypackages)
+libraries('tidyverse','lubridate','janitor','showtext',
+          'summarytools','tidymodels')
+theme_set(theme_light())
+font_add_google('Roboto Slab','Roboto Slab')
+showtext_auto()
+tidymodels_prefer()
+options(scipen=999)
+```
+
+
+```{r}
+employee_df  <- read_rds('dataset/employee_data.rds') %>% 
+                mutate(salary = log(salary,base = 10))
+```
+
+### Data prep 
+
+```{r}
+employee_split <- initial_split(employee_df,0.75,strata = performance_rating)
+employee_train <- training(employee_split) 
+employee_test <- testing(employee_split)
+
+```
+
+```{r}
+employee_train
+```
+
+
+```{r}
+employee_train %>% 
+    recipe(left_company ~.) %>% 
+    step_scale(all_numeric_predictors()) %>% 
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+    step_zv(all_predictors()) %>% 
+    prep() %>% 
+    juice()
+
+employee_rec <- 
+  employee_train %>% 
+      recipe(left_company ~.) %>% 
+      step_scale(all_numeric_predictors()) %>% 
+      step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+      step_zv(all_predictors()) 
+```
+
+### Set sampling procedures using k-folds 
+
+```{r}
+kfolds <- vfold_cv(employee_train, v = 10, strata = performance_rating)
+
+```
+
+### Model & Workflow & Tuning 
+
+```{r}
+## Model 
+rand_mod <- 
+  rand_forest(mtry = tune(),trees = 1000,min_n = tune()) %>% 
+  set_engine('randomForest') %>% 
+  set_mode('classification') 
+ 
+## Workflow 
+employee_wf <-
+  workflow() %>% 
+  add_recipe(employee_rec) %>% 
+  add_model(rand_mod)
+ 
+# Tunning 
+employee_tune <- 
+  tune_grid(employee_wf,resamples = kfolds,grid = 5)
+
+```
+
+### Evaulate Model 
+
+```{r}
+employee_tune %>% 
+  show_best('accuracy') %>% 
+  head(1)
+
+employee_best_tune <-
+  employee_tune %>% 
+  show_best('accuracy') %>% 
+  head(1)
+```
+
+### Workflow for finalise model
+
+```{r}
+employee_final_mod <-
+  finalize_model(rand_mod,employee_best_tune)
+
+employ_final_wf <-
+  workflow() %>% 
+  add_recipe(employee_rec) %>% 
+  add_model(employee_final_mod)
+
+```
+
+### Fit and Collect metric and prediction
+
+```{r}
+employ_fit <- 
+  last_fit(employ_final_wf,employee_split)
+
+employ_fit %>% 
+  collect_metrics() 
+
+employ_fit %>% 
+  collect_predictions() %>% 
+  View()
+```
+
+
