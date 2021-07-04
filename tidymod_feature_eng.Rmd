@@ -1,0 +1,242 @@
+```{r include=FALSE}
+library(easypackages)
+libraries('tidyverse','lubridate','janitor','showtext',
+          'summarytools','tidymodels')
+theme_set(theme_light())
+font_add_google('Roboto Slab','Roboto Slab')
+showtext_auto()
+tidymodels_prefer()
+options(scipen=999)
+```
+
+### Read titanic dataset
+
+#### Data Dictionary 
+
++----------------------+---------------------------------------------+---------------------------+
+| Variable             | Definition                                  | Key                       |
++======================+=============================================+===========================+
+| survival             | Survival                                    | 0 = No, 1 = Yes           |
++----------------------+---------------------------------------------+---------------------------+
+| pclass               | Ticket class                                | 1 = 1st, 2 = 2nd, 3 = 3rd |
++----------------------+---------------------------------------------+---------------------------+
+| sex                  | Sex                                         |                           |
++----------------------+---------------------------------------------+---------------------------+
+| Age                  | Age in years                                |                           |
++----------------------+---------------------------------------------+---------------------------+
+| sibsp                | \# of siblings / spouses aboard the Titanic |                           |
++----------------------+---------------------------------------------+---------------------------+
+| parch                | \# of parents / children aboard the Titanic |                           |
++----------------------+---------------------------------------------+---------------------------+
+| ticket               | Ticket number                               |                           |
++----------------------+---------------------------------------------+---------------------------+
+| fare                 | Passenger fare                              |                           |
++----------------------+---------------------------------------------+---------------------------+
+| cabin                | Cabin number                                |                           |
++----------------------+---------------------------------------------+---------------------------+
+| embarked             | Port of Embarkation                         |                           |
++----------------------+---------------------------------------------+---------------------------+
+
+```{r}
+titanic <-
+  read_csv('https://gist.githubusercontent.com/michhar/2dfd2de0d4f8727f873422c5d959fff5/raw/fa71405126017e6a37bea592440b4bee94bf7b9e/titanic.csv') %>% 
+  clean_names()
+
+
+titanic <-
+  titanic %>% 
+  mutate(embarked = case_when(
+    embarked == 'C' ~'Cherbourg',
+    embarked == 'Q' ~'Queenstown',
+    embarked == 'S' ~'Southampton'
+  )) %>% 
+  mutate(across(where(is.character),factor)) %>% 
+  mutate(survived = factor(survived)) %>% 
+  select(-ticket)
+
+titanic %>% 
+  map_df(~sum(is.na(.)))
+
+```
+
+### Ordering Steps
+
+\*\* Update role then do following
+
+1.  Impute
+
+2.  Handle factor levels
+
+3.  Individual transformations for skewness and other issues
+
+4.  Discretize (if needed and if you have no other choice)
+
+5.  Create dummy variables
+
+6.  Create interactions
+
+7.  Normalization steps (center, scale, range, etc)
+
+8.  Multivariate transformation (e.g.PCA, spatial sign, etc)
+
+### 1.1 Impute embarked varriable
+
+```{r}
+titanic %>% 
+  group_by(embarked) %>% 
+  summarise(count = n(),
+            avg_age = mean(age,na.rm = T),
+            avg_fare = mean(fare,na.rm = T))
+
+titanic %>% 
+  filter(is.na(embarked))
+
+```
+
+```{r}
+# Imputed by mode
+titanic %>% 
+  recipe(survived ~.,) %>% 
+  step_impute_mode(embarked) %>% 
+  prep() %>% 
+  juice() %>% 
+  filter(passenger_id %in% c(62,830))
+
+# Impute by KNN 
+titanic %>% 
+  recipe(survived ~.,) %>% 
+  step_impute_knn(embarked) %>% 
+  prep() %>% 
+  juice() %>% 
+  filter(passenger_id %in% c(62,830))
+
+```
+
+### 1.2 Impute age varriable
+
+```{r}
+# Check density of current
+titanic %>% 
+  ggplot(aes(age)) +
+  geom_density()
+
+# 
+titanic %>% 
+  recipe(survived ~.,) %>% 
+  step_impute_median(age) %>% 
+  prep() %>% 
+  juice() %>% 
+  ggplot(aes(age)) +
+  geom_density()
+
+```
+
+## 2.1 Individual transformations for skewness and other issues
+
+```{r}
+titanic %>% 
+  select(where(negate(is.factor)), -passenger_id) %>% 
+  gather() %>% 
+  ggplot(aes(value, fill = key)) + 
+  geom_histogram() + 
+  facet_wrap(~key , scales = 'free_x') +
+  scale_x_log10()
+
+# Look like fare need to be log10 for not better normal distribution 
+titanic %>% 
+  recipe(survived ~.,) %>% 
+  step_impute_knn(embarked) %>% 
+  step_impute_median(age) %>% 
+  step_log(fare,base = 10) %>% 
+  prep() %>% 
+  juice()
+  
+```
+
+### 5.1 Create dummy varrible and Zero varriance
+
+```{r}
+titanic %>% 
+  recipe(survived ~.,) %>% 
+  update_role(c(passenger_id,name,cabin),new_role = 'ID') %>% 
+  step_impute_knn(embarked) %>% 
+  step_impute_median(age) %>% 
+  step_log(fare,base = 10) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) %>% 
+  prep() %>% 
+  juice()
+
+```
+
+### 7.1
+
+```{r}
+titanic %>% 
+  recipe(survived ~.,) %>% 
+  update_role(c(passenger_id,name,cabin),new_role = 'ID') %>% 
+  step_impute_knn(embarked) %>% 
+  step_impute_median(age) %>% 
+  step_log(fare,base = 10) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) %>% 
+  step_scale(all_numeric_predictors(), -fare) %>% 
+  prep() %>% 
+  juice()
+```
+
+```{r}
+titanic_split <- initial_split(titanic,0.75,strata = sib_sp)
+titanic_train <- training(titanic_split)
+titanic_test <- testing(titanic_split)
+```
+
+### Create Recipe
+
+```{r}
+titanic_rec <- 
+  titanic_train %>% 
+    recipe(survived ~.,) %>% 
+    update_role(c(passenger_id,name,cabin),new_role = 'ID') %>% 
+    step_impute_knn(embarked) %>% 
+    step_impute_median(age) %>% 
+  #  step_log(fare,base = 10) %>% 
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+    step_zv(all_predictors()) # %>% 
+  # step_scale(all_numeric_predictors(), -fare) 
+```
+
+### Model and evaluate
+
+```{r}
+kfold <- vfold_cv(titanic_train, 10, strata = sib_sp)
+
+log_rg_mod <-
+  logistic_reg() %>% 
+  set_engine('glm')  # Logistic regress has problem with log transform
+
+titanic_wf <-
+  workflow() %>% 
+  add_recipe(titanic_rec) %>% 
+  add_model(log_rg_mod)
+
+titanic_tune <-
+  tune_grid(titanic_wf,resamples = kfold, grid = 5)
+
+titanic_tune %>% 
+  show_best()
+
+```
+
+### Prediction
+
+```{r}
+titanic_fit <-last_fit(titanic_wf,titanic_split) 
+
+titanic_fit %>% 
+  collect_metrics()
+
+titanic_fit %>% 
+  collect_predictions()
+
+```

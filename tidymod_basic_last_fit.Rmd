@@ -1,6 +1,6 @@
 
 
-```{r}
+```{r include=FALSE}
 library(easypackages)
 libraries('tidyverse','lubridate','janitor','showtext',
           'summarytools','tidymodels')
@@ -111,9 +111,9 @@ employ_fit <-
 employ_fit %>% 
   collect_metrics() 
 
-employ_fit %>% 
-  collect_predictions() %>% 
-  View()
+employ_fit %>%
+  collect_predictions() 
+
 ```
 
 
