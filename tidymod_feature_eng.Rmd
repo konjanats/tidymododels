@@ -1,3 +1,5 @@
+
+
 ```{r include=FALSE}
 library(easypackages)
 libraries('tidyverse','lubridate','janitor','showtext',
@@ -240,3 +242,11 @@ titanic_fit %>%
   collect_predictions()
 
 ```
+
+
+```{r}
+
+```
+
+
+
