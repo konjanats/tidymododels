@@ -1,0 +1,241 @@
+
+## How's likely people will die in  Himalayan Climbing ? 
+
+```{r include=FALSE}
+library(easypackages)
+libraries('tidyverse','lubridate','janitor','showtext',
+          'skimr','tidymodels','tidytuesdayR','themis','xgboost','vip')
+theme_set(theme_light())
+font_add_google('Roboto Slab','Roboto Slab')
+showtext_auto()
+tidymodels_prefer()
+options(scipen=999)
+
+```
+
+### Loading Data
+
+```{r}
+tuesdata <- tt_load(2020, week = 39)
+members <- tuesdata$members
+
+members %>% glimpse()
+
+members %>% 
+  map_df(~sum(is.na(.)))
+
+members %>% 
+ skim()
+
+```
+
+### Explornatory Analysis
+
+```{r}
+
+members %>% 
+  group_by(year = (year %/% 10) * 10) %>%  # summarised by decade
+  summarise(died = mean(died), 
+            success = mean(success)) %>% 
+  pivot_longer(died:success, names_to = 'outcome', values_to = 'percent')
+
+
+members %>% 
+  group_by(year = (year %/% 10) * 10) %>%  # summarised by decade
+  summarise(died = mean(died), 
+            success = mean(success)) %>% 
+  pivot_longer(died:success, names_to = 'outcome', values_to = 'percent') %>% 
+  ggplot(aes(year,percent, color = outcome)) +
+  geom_line(alpha = 0.7, size = 1.2) + 
+  scale_y_continuous(labels = scales::percent_format())
+
+```
+
+```{r}
+members %>% 
+  count(success,died) %>% 
+  group_by(success) %>% 
+  mutate(percent = n/sum(n)) 
+
+# So if you fail to success , doesn't mean you will die. But if you're succeess , it means you're not die.
+
+```
+
+```{r}
+members %>% 
+  filter(!is.na(peak_name)) %>% 
+  mutate(peak_name = fct_lump(peak_name,prop = 0.05)) %>% 
+  group_by(peak_name) %>% 
+  summarise(die_pct = mean(died)*100)
+```
+
+```{r}
+members %>% 
+  filter(season != 'Unknown') %>% 
+  group_by(season) %>% 
+  summarise(died_ptc = mean(died)*100)
+
+```
+### Prepare for recipe 
+
+- Filter out unneccesary 
+- Select only focused varriables
+- Mutate all logical into numberic 
+- Mutate character into factor
+- Mutate the outcome into factor
+
+```{r}
+
+members %>% 
+  filter(season != 'Unknown') %>% 
+  select(-expedition_id,-success, -matches('metres|cause|type')) %>%  # drop some columns with matches 
+  mutate(across(where(is.logical), as.numeric)) %>%  # convert logical to numeric 
+  mutate(across(where(is.character), as.factor)) %>%  # convert charactor to factor 
+       #  across(where(is.factor),fct_lump,  prop = 0.05)) %>%  #  factor lump proportion 
+  mutate(died = factor(died)) %>%  # varriable to be predicted as factor 
+  skim()
+
+members_df <- 
+  members %>% 
+  filter(season != 'Unknown') %>% 
+  select(peak_id, year, season, sex, age, citizenship, hired, success, 
+         died,expedition_role) %>%  
+  mutate(across(where(is.logical), as.numeric)) %>%  # convert logical to numeric 
+  mutate(across(where(is.character), as.factor)) %>%  # convert charactor to factor 
+        # across(where(is.factor),fct_lump,  prop = 0.05)) %>%  #  factor lump proportion 
+  mutate(died = factor(died))  # varriable to be predicted as factor 
+ 
+```
+
+### Data Spliting 
+
+```{r}
+set.seed(1024)
+members_split <-  initial_split(members_df, prop = 0.75 , strata = 'died')
+members_train <- training(members_split) 
+members_test <- testing(members_split)
+
+members_folds <- vfold_cv(members_train, v = 10)
+
+```
+
+### Recipe (and Smote)
+
+```{r}
+members_train %>% 
+  recipe(died ~.,) %>% 
+  update_role(peak_id, new_role = 'ID') %>% 
+  step_impute_knn(c(sex,citizenship,expedition_role)) %>%  # impute kkn before step_other 
+  step_impute_median(age) %>% 
+  step_other(c(citizenship,expedition_role), threshold = 0.05) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) %>% 
+  step_smote(died) %>%  # smothe resampling, making died ration re-balanced 
+  prep() %>% 
+  juice() %>% 
+  skim()
+
+members_rec <-
+  members_train %>% 
+  recipe(died ~.,) %>% 
+  update_role(peak_id, new_role = 'ID') %>% 
+  step_impute_knn(c(sex,citizenship,expedition_role)) %>%  # impute kkn before step_other 
+  step_impute_median(age) %>% 
+  step_other(c(citizenship,expedition_role), threshold = 0.05) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) %>% 
+  step_smote(died)   # smothe resampling, making died ration re-balanced 
+
+```
+
+### Model 
+
+#### Logistic Regression 
+
+```{r}
+doParallel::registerDoParallel()
+
+## Logistic Regression 
+
+member_wf <-
+  workflow() %>% 
+  add_recipe(members_rec)
+
+glm_mod <- 
+  logistic_reg() %>%
+  set_engine("glm") %>% 
+  set_mode('classification')
+
+
+glm_res <-
+  member_wf %>% 
+  add_model(glm_mod) %>% 
+  fit_resamples(resamples = members_folds,
+                control = control_resamples(save_pred = TRUE))
+
+glm_res %>% 
+  collect_metrics() 
+
+glm_res %>% 
+  collect_predictions()
+                
+```
+
+#### Xgboost 
+
+```{r}
+## Xgboost Model 
+
+xgboost_mod <- 
+  boost_tree(mtry = tune(), min_n = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") 
+
+xgboost_tune <-
+  tune_grid(member_wf %>% add_model(xgboost_mod),resamples = members_folds, grid = 5)
+
+xgboost_tune %>% 
+  show_best('accuracy') %>% 
+  head(1)
+
+```
+
+#### Final Model from Xgboost
+
+```{r}
+## Final Model from XGBOOST 
+
+member_final_mod <- 
+  finalize_model(xgboost_mod, xgboost_tune %>% show_best('accuracy') %>% head(1))
+
+member_final_wf <-
+  member_wf %>% 
+  add_model(member_final_mod)
+
+xgboost_fit <-
+  last_fit(member_final_wf, members_split)
+
+xgboost_fit %>% 
+  collect_predictions()
+
+```
+
+### Evaluation 
+
+```{r}
+xgboost_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(died, .pred_0) %>% 
+  autoplot()
+```
+
+### Indicate varrible importance 
+
+```{r}
+member_final_wf %>% 
+  fit(members_train) %>% 
+  pull_workflow_fit() %>% 
+  vip(geom = 'point', include_type = T)
+```
+
+
