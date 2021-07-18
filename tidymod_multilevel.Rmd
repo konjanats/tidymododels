@@ -1,0 +1,300 @@
+
+```{r}
+library(easypackages)
+libraries('tidyverse','lubridate','janitor','showtext',
+          'skimr','tidymodels','tidytuesdayR','themis','xgboost','vip','esquisse')
+theme_set(theme_light())
+font_add_google('Roboto Slab','Roboto Slab')
+showtext_auto()
+tidymodels_prefer()
+options(scipen=999)
+```
+
+
+```{r}
+raindrop <- read_csv('dataset/weatherAUS.csv') %>% clean_names()
+
+raindrop %>% skim()
+
+```
+
+
+```{r}
+cities <-  c('Perth','Darwin','Brisbane','Adelaide','Sydney','Melbourne')
+
+rain <- 
+  raindrop %>% 
+  filter(location %in% cities) 
+
+rain %>% 
+  skim()
+```
+
+### Exploratory Analysis 
+
+```{r}
+rain %>% 
+  filter(!is.na(rain_today),!is.na(rain_tomorrow)) %>% 
+  group_by(rain_today) %>% 
+  count(rain_tomorrow) %>% 
+  mutate(pct = n/sum(n))
+```
+
+### Final clean to recipe 
+
+- evaporation and sunshine have lots of missing data 
+- rain_today is very influence to rain_tomorrow
+- wind_gust_speed has over 30% of NA 
+- cloud9am & cloud3pm have over 20% of NA 
+
+```{r}
+
+rain %>% 
+  select(-evaporation,-sunshine,-rain_today,-rain_tomorrow, 
+         -matches('wind_gust'), -matches('^cloud')) %>% 
+  mutate(across(where(is.character),as.factor)) %>% 
+  skim()
+
+rain_df <-
+  rain %>% 
+  select(-evaporation,-sunshine,-rain_today, -matches('wind_gust'), -matches('^cloud')) %>% 
+  mutate(across(where(is.character),as.factor)) %>% 
+  mutate(rain_tomorrow = fct_relevel(rain_tomorrow, 'Yes','No'))  # Level for prediction class
+  
+```
+
+
+### Initial Split 
+
+```{r}
+set.seed(1024)
+
+rain_spit <- initial_split(rain_df, 0.75, strata = location) 
+rain_test <- testing(rain_spit)
+rain_train <- training(rain_spit)
+
+rain_folds <- vfold_cv(rain_train, v = 10) 
+```
+
+### Recipe 
+
+```{r}
+rain_train %>%
+  recipe(rain_tomorrow ~.) %>% 
+    update_role(c(location,date), new_role = 'ID') %>% 
+    step_impute_knn(all_nominal_predictors()) %>%
+    step_impute_knn(all_outcomes(), skip = T) %>% 
+    step_impute_median(all_numeric_predictors()) %>% 
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+    step_zv(all_predictors()) %>% 
+    step_scale(all_numeric_predictors()) %>% 
+    step_smote(rain_tomorrow, skip = T) %>% 
+    prep() %>% 
+    juice() %>% 
+    skim()
+
+
+rain_rec <-
+  rain_train %>%
+  recipe(rain_tomorrow ~.) %>% 
+    update_role(c(location,date), new_role = 'ID') %>% 
+    step_impute_knn(all_nominal_predictors()) %>%
+    step_impute_knn(all_outcomes(), skip = T) %>% 
+    step_impute_median(all_numeric_predictors()) %>% 
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+    step_zv(all_predictors()) %>% 
+    step_scale(all_numeric_predictors()) %>% 
+    step_smote(rain_tomorrow, skip = T)
+
+```
+
+### Model 
+
+1.Logistic Regression 
+
+```{r}
+## Initiate Workflow 
+
+rain_wf <-
+  workflow() %>% 
+  add_recipe(rain_rec)
+
+## Model 
+glm_mod <- 
+  logistic_reg() %>%
+  set_engine("glm") %>% 
+  set_mode('classification')
+
+## Resampling 
+glm_res <-
+  rain_wf %>% 
+  add_model(glm_mod) %>% 
+  fit_resamples(resamples = rain_folds,
+                control = control_resamples(save_pred = TRUE))
+
+glm_res %>% 
+  collect_predictions()
+
+glm_res %>% 
+  collect_metrics() 
+
+```
+
+2. Xgboost 
+
+```{r}
+xgboost_mod <- 
+  boost_tree(mtry = tune(),min_n = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification") 
+
+xgboost_tune <-
+  tune_grid(rain_wf %>% add_model(xgboost_mod),
+            resamples = rain_folds,grid = 5)
+
+xgboost_tune %>% 
+  show_best('accuracy') %>% 
+  head(1)
+
+xgboost_tune %>% 
+  select_best('accuracy') 
+
+```
+
+###  Finalise model from xgboost
+
+```{r}
+rain_final_wf <-
+  rain_wf %>% 
+  add_model(xgboost_mod) %>% 
+  finalize_workflow(xgboost_tune %>% select_best('accuracy'))
+
+rain_fit <-
+  last_fit(rain_final_wf,rain_spit)
+
+rain_fit %>% 
+  collect_metrics()
+```
+
+
+```{r}
+rain_fit %>% 
+  collect_predictions() %>% 
+  conf_mat(rain_tomorrow, .pred_class) 
+
+rain_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(rain_tomorrow, .pred_Yes) %>% 
+  autoplot()
+```
+
+
+### Varriable Importance 
+
+```{r}
+rain_final_wf %>% 
+  fit(rain_train) %>% 
+  pull_workflow_fit() %>% 
+  vip(geom = 'point', include_type = T)
+```
+### Create multilevel model 
+
+
+```{r}
+rain_gr <- 
+  raindrop %>% 
+  select(-evaporation,-sunshine,-rain_today, -matches('wind_gust'), -matches('^cloud')) %>% 
+  filter(location %in% cities) %>% 
+  mutate(across(where(is.character),as.factor))
+
+rain_gr %>% 
+  group_by(location) %>% 
+  nest()
+
+```
+
+
+
+```{r}
+
+model_procress <- function(x) {
+  
+  x <- 
+    rain_df %>% 
+      filter(location == 'Sydney') %>% 
+      select(-location)
+  
+  ## Traing & Tesing Split 
+  
+  set.seed(1024)
+  rain_folds <- vfold_cv(x, v = 10) 
+  
+  ## Recipe 
+  rain_rec <-
+        recipe(rain_tomorrow ~. , data = x) %>% 
+        update_role(c(date), new_role = 'ID') %>% 
+        step_impute_knn(all_nominal_predictors()) %>%
+        #when working on predict,modifying outcome must input skip = T 
+        step_impute_knn(all_outcomes(), skip = T) %>% 
+        step_impute_median(all_numeric_predictors()) %>% 
+        step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
+        step_zv(all_predictors()) %>% 
+        step_scale(all_numeric_predictors()) %>% 
+        #when working on predict,modifying outcome must input skip = T 
+        step_smote(rain_tomorrow, skip = T)
+  
+  ## Xgboost Tune 
+  xgboost_mod <- 
+    boost_tree(mtry = tune(),min_n = tune()) %>% 
+      set_engine("xgboost") %>% 
+      set_mode("classification") 
+
+  rain_wf <-
+    workflow() %>% 
+    add_recipe(rain_rec) %>% 
+    add_model(xgboost_mod)
+  
+  xgboost_tune <-
+    tune_grid(rain_wf,resamples = rain_folds,grid = 5)
+
+  rain_final_wf <-
+    rain_wf %>% 
+    finalize_workflow(xgboost_tune %>% select_best('accuracy'))
+
+  final_model <-
+    fit(rain_final_wf,x)
+  
+  cat('Model completed\n')
+  
+  return(final_model)
+  
+  ##predict(final_model,x)
+  
+}
+```
+
+
+```{r}
+rain_models <-
+  rain_gr %>% 
+    group_by(location) %>% 
+    nest() %>% 
+    mutate(model = map(data,model_procress))
+```
+
+
+```{r}
+rain_models %>% 
+  mutate(results = map2(model,data,predict)) %>% 
+  select(location,data,results) %>% 
+  unnest() %>% 
+  ggplot(aes(humidity3pm, fill = .pred_class)) + 
+  geom_density(alpha = 0.3) + 
+  facet_wrap(~location)
+  
+```
+
+
+
+
+
